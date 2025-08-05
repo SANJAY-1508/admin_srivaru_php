@@ -10,14 +10,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 $json = file_get_contents('php://input');
-$obj = json_decode($json, true); // Use true for associative array
+$obj = json_decode($json, true);
 $output = array();
 date_default_timezone_set('Asia/Calcutta');
 $timestamp = date('Y-m-d H:i:s');
 $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https://" : "http://";
 $domain = $_SERVER['HTTP_HOST'];
 $base_url = $protocol . $domain;
-
 
 function processImage($base64Data, $prefix)
 {
@@ -43,7 +42,7 @@ function processImage($base64Data, $prefix)
     return ['path' => $base_url . '/' . $cleaned_path];
 }
 
-// <<<<<<<<<<===================== List CSR Entries =====================>>>>>>>>>>
+// List CSR Entries
 if (isset($obj['search_text']) && (!isset($obj['action']) || $obj['action'] !== 'list_error')) {
     $search_text = $conn->real_escape_string($obj['search_text']);
     $search_terms = array_filter(array_map('trim', explode(' ', $search_text)));
@@ -54,7 +53,6 @@ if (isset($obj['search_text']) && (!isset($obj['action']) || $obj['action'] !== 
         $conditions[] = "(csr_no LIKE '%$term%' OR customer_name LIKE '%$term%' OR wtg_no LIKE '%$term%' OR csr_type LIKE '%$term%' OR site_name LIKE '%$term%')";
     }
 
-    // Add date filters if provided
     $date_conditions = [];
     if (isset($obj['fromDate']) && !empty($obj['fromDate'])) {
         $fromDate = $conn->real_escape_string($obj['fromDate']);
@@ -65,7 +63,6 @@ if (isset($obj['search_text']) && (!isset($obj['action']) || $obj['action'] !== 
         $date_conditions[] = "csr_entry_date <= '$toDate'";
     }
 
-    // Combine all conditions
     $where_clause = !empty($conditions) ? implode(' AND ', $conditions) : '1=1';
     if (!empty($date_conditions)) {
         $where_clause .= ' AND ' . implode(' AND ', $date_conditions);
@@ -90,6 +87,7 @@ if (isset($obj['search_text']) && (!isset($obj['action']) || $obj['action'] !== 
     $entries = [];
     while ($row = $result->fetch_assoc()) {
         $row['parts_data'] = json_decode($row['parts_data'], true) ?? [];
+        $row['error_details'] = json_decode($row['error_details'], true) ?? [];
         $row['employee_sign'] = !empty($row['employee_sign']) ? $base_url . '/' . str_replace('../', '', $row['employee_sign']) : '';
         $row['incharge_operator_sign'] = !empty($row['incharge_operator_sign']) ? $base_url . '/' . str_replace('../', '', $row['incharge_operator_sign']) : '';
         $entries[] = $row;
@@ -100,10 +98,10 @@ if (isset($obj['search_text']) && (!isset($obj['action']) || $obj['action'] !== 
     $output["body"]["csr_entries"] = $entries;
 }
 
-// <<<<<<<<<<===================== List error =====================>>>>>>>>>>
+// List Errors
 elseif (isset($obj['action']) && $obj['action'] === 'list_error' && isset($obj['search_text'])) {
     $search_text = $conn->real_escape_string($obj['search_text']);
-    $output["body"]["errors"] = []; // Always initialize
+    $output["body"]["errors"] = [];
 
     $query = "SELECT * FROM `error` WHERE (`error_code` LIKE '%$search_text%' OR `error_describtion` LIKE '%$search_text%') AND `delete_at` = 0 ORDER BY id DESC";
 
@@ -123,17 +121,12 @@ elseif (isset($obj['action']) && $obj['action'] === 'list_error' && isset($obj['
     }
 
     $output["head"]["code"] = 200;
-    if (count($output["body"]["errors"]) > 0) {
-        $output["head"]["msg"] = "Success";
-    } else {
-        $output["head"]["msg"] = "No errors found";
-    }
-
+    $output["head"]["msg"] = count($output["body"]["errors"]) > 0 ? "Success" : "No errors found";
     echo json_encode($output, JSON_NUMERIC_CHECK);
     exit();
 }
 
-// <<<<<<<<<<===================== Create CSR Entry =====================>>>>>>>>>>
+// Create CSR Entry
 elseif (isset($obj['csr_no']) && !isset($obj['edit_csr_entry_id'])) {
     $fields = [
         'csr_no' => $conn->real_escape_string($obj['csr_no'] ?? ''),
@@ -142,8 +135,7 @@ elseif (isset($obj['csr_no']) && !isset($obj['edit_csr_entry_id'])) {
         'customer_name' => $conn->real_escape_string($obj['customer_name'] ?? ''),
         'contract_id' => $conn->real_escape_string($obj['contract_id'] ?? ''),
         'contract_type' => $conn->real_escape_string($obj['contract_type'] ?? ''),
-        'error_id' => $conn->real_escape_string($obj['error_id'] ?? ''),
-        'error_details' => $conn->real_escape_string($obj['error_details'] ?? ''),
+        'error_details' => $conn->real_escape_string(json_encode($obj['error_details'] ?? [], JSON_UNESCAPED_SLASHES)),
         'turbine_id' => $conn->real_escape_string($obj['turbine_id'] ?? ''),
         'wtg_no' => $conn->real_escape_string($obj['wtg_no'] ?? ''),
         'loc_no' => $conn->real_escape_string($obj['loc_no'] ?? ''),
@@ -180,8 +172,6 @@ elseif (isset($obj['csr_no']) && !isset($obj['edit_csr_entry_id'])) {
         'customer_name',
         'contract_id',
         'contract_type',
-        'error_id',
-        'error_details',
         'turbine_id',
         'wtg_no',
         'loc_no',
@@ -244,7 +234,6 @@ elseif (isset($obj['csr_no']) && !isset($obj['edit_csr_entry_id'])) {
         exit();
     }
 
-    // Signatures processing
     $employee_sign = processImage($obj['employee_sign'], 'employee_sign')['path'] ?? '';
     $incharge_operator_sign = processImage($obj['incharge_operator_sign'], 'incharge_operator_sign')['path'] ?? '';
 
@@ -255,25 +244,25 @@ elseif (isset($obj['csr_no']) && !isset($obj['edit_csr_entry_id'])) {
 
     $sql = "INSERT INTO `csr_entry` (
         `csr_no`, `csr_entry_date`, `customer_id`, `customer_name`, `contract_id`, `contract_type`,
-        `error_id`, `error_details`, `turbine_id`, `wtg_no`, `loc_no`, `model_id`, `model_type`,
+        `error_details`, `turbine_id`, `wtg_no`, `loc_no`, `model_id`, `model_type`,
         `htsc_no`, `capacity`, `make`, `csr_booked_by`, `csr_booked_by_date`, `csr_booked_by_time`,
         `nature_of_work`, `system_down`, `system_down_date`, `system_down_time`, `work_st_date`,
-        `work_st_time`, `work_end_date`, `work_end_time`, `parts_data`, `employee_name`,`employee_id`,
-        `employee_sign`, `incharge_operator_name`, `incharge_operator_sign`, `csr_type`,`site_id`, `site_name`, `customer_feedback`,
+        `work_st_time`, `work_end_date`, `work_end_time`, `parts_data`, `employee_name`, `employee_id`,
+        `employee_sign`, `incharge_operator_name`, `incharge_operator_sign`, `csr_type`, `site_id`, `site_name`, `customer_feedback`,
         `create_at`, `delete_at`
     ) VALUES (
         '{$fields['csr_no']}', '{$fields['csr_entry_date']}', '{$fields['customer_id']}',
         '{$fields['customer_name']}', '{$fields['contract_id']}', '{$fields['contract_type']}',
-        '{$fields['error_id']}', '{$fields['error_details']}', '{$fields['turbine_id']}',
-        '{$fields['wtg_no']}', '{$fields['loc_no']}', '{$fields['model_id']}',
-        '{$fields['model_type']}', '{$fields['htsc_no']}', '{$fields['capacity']}',
-        '{$fields['make']}', '{$fields['csr_booked_by']}', '{$fields['csr_booked_by_date']}',
-        '{$fields['csr_booked_by_time']}', '{$fields['nature_of_work']}', '{$fields['system_down']}',
-        '{$fields['system_down_date']}', '{$fields['system_down_time']}', '{$fields['work_st_date']}',
-        '{$fields['work_st_time']}', '{$fields['work_end_date']}', '{$fields['work_end_time']}',
-        '{$fields['parts_data']}', '{$fields['employee_name']}', '{$fields['employee_id']}', '{$employee_sign}',
-        '{$fields['incharge_operator_name']}', '{$incharge_operator_sign}', '{$fields['csr_type']}','{$fields['site_id']}',
-        '{$fields['site_name']}', '{$fields['customer_feedback']}', '$timestamp', 0
+        '{$fields['error_details']}', '{$fields['turbine_id']}', '{$fields['wtg_no']}',
+        '{$fields['loc_no']}', '{$fields['model_id']}', '{$fields['model_type']}',
+        '{$fields['htsc_no']}', '{$fields['capacity']}', '{$fields['make']}',
+        '{$fields['csr_booked_by']}', '{$fields['csr_booked_by_date']}', '{$fields['csr_booked_by_time']}',
+        '{$fields['nature_of_work']}', '{$fields['system_down']}', '{$fields['system_down_date']}',
+        '{$fields['system_down_time']}', '{$fields['work_st_date']}', '{$fields['work_st_time']}',
+        '{$fields['work_end_date']}', '{$fields['work_end_time']}', '{$fields['parts_data']}',
+        '{$fields['employee_name']}', '{$fields['employee_id']}', '{$employee_sign}',
+        '{$fields['incharge_operator_name']}', '{$incharge_operator_sign}', '{$fields['csr_type']}',
+        '{$fields['site_id']}', '{$fields['site_name']}', '{$fields['customer_feedback']}', '$timestamp', 0
     )";
 
     if (mysqli_query($conn, $sql)) {
@@ -316,8 +305,7 @@ elseif (isset($obj['edit_csr_entry_id'])) {
         'customer_name' => $conn->real_escape_string($obj['customer_name'] ?? ''),
         'contract_id' => $conn->real_escape_string($obj['contract_id'] ?? ''),
         'contract_type' => $conn->real_escape_string($obj['contract_type'] ?? ''),
-        'error_id' => $conn->real_escape_string($obj['error_id'] ?? ''),
-        'error_details' => $conn->real_escape_string($obj['error_details'] ?? ''),
+        'error_details' => $conn->real_escape_string(json_encode($obj['error_details'] ?? [], JSON_UNESCAPED_SLASHES)),
         'turbine_id' => $conn->real_escape_string($obj['turbine_id'] ?? ''),
         'wtg_no' => $conn->real_escape_string($obj['wtg_no'] ?? ''),
         'loc_no' => $conn->real_escape_string($obj['loc_no'] ?? ''),
@@ -354,8 +342,6 @@ elseif (isset($obj['edit_csr_entry_id'])) {
         'customer_name',
         'contract_id',
         'contract_type',
-        'error_id',
-        'error_details',
         'turbine_id',
         'wtg_no',
         'loc_no',
@@ -395,7 +381,6 @@ elseif (isset($obj['edit_csr_entry_id'])) {
         exit();
     }
 
-    // Check if csr_no exists in another record
     $check_sql = "SELECT `id` FROM `csr_entry` WHERE `csr_no` = '{$fields['csr_no']}' AND `csr_entry_id` != '{$edit_id}' AND `delete_at` = 0";
     $check_result = mysqli_query($conn, $check_sql);
     if (mysqli_num_rows($check_result) > 0) {
@@ -405,7 +390,6 @@ elseif (isset($obj['edit_csr_entry_id'])) {
         exit();
     }
 
-    // Incharge operator sign
     $incharge_operator_sign = '';
     if (!empty($obj['incharge_operator_sign']) && strpos($obj['incharge_operator_sign'], 'data:image') === 0) {
         $imgResult = processImage($obj['incharge_operator_sign'], 'incharge_operator_sign');
@@ -421,7 +405,6 @@ elseif (isset($obj['edit_csr_entry_id'])) {
         $incharge_operator_sign = $row['incharge_operator_sign'] ?? '';
     }
 
-    // Employee sign
     $employee_sign = '';
     if (!empty($obj['employee_sign']) && strpos($obj['employee_sign'], 'data:image') === 0) {
         $imgResult = processImage($obj['employee_sign'], 'employee_sign');
@@ -450,7 +433,6 @@ elseif (isset($obj['edit_csr_entry_id'])) {
         exit();
     }
 
-    // Prepare update SQL
     $update_sql = "UPDATE `csr_entry` SET 
         `csr_no` = '{$fields['csr_no']}',
         `csr_entry_date` = '{$fields['csr_entry_date']}',
@@ -458,7 +440,6 @@ elseif (isset($obj['edit_csr_entry_id'])) {
         `customer_name` = '{$fields['customer_name']}',
         `contract_id` = '{$fields['contract_id']}',
         `contract_type` = '{$fields['contract_type']}',
-        `error_id` = '{$fields['error_id']}',
         `error_details` = '{$fields['error_details']}',
         `turbine_id` = '{$fields['turbine_id']}',
         `wtg_no` = '{$fields['wtg_no']}',
@@ -511,7 +492,7 @@ elseif (isset($obj['edit_csr_entry_id'])) {
     }
 }
 
-// <<<<<<<<<<===================== Delete CSR Entry =====================>>>>>>>>>>
+// Delete CSR Entry
 elseif (isset($obj['delete_csr_entry_id'])) {
     $delete_id = $conn->real_escape_string($obj['delete_csr_entry_id']);
 
@@ -522,7 +503,6 @@ elseif (isset($obj['delete_csr_entry_id'])) {
         exit();
     }
 
-    // Build normal query
     $update_sql = "UPDATE `csr_entry` SET `delete_at` = 1 WHERE `csr_entry_id` = '{$delete_id}'";
 
     if (mysqli_query($conn, $update_sql)) {
@@ -535,7 +515,7 @@ elseif (isset($obj['delete_csr_entry_id'])) {
     }
 }
 
-// <<<<<<<<<<===================== List get_turbine_data =====================>>>>>>>>>>
+// Get Turbine Data
 elseif (isset($obj['action']) && $obj['action'] === 'get_turbine_data') {
     try {
         $query = "
