@@ -211,6 +211,13 @@ elseif (isset($obj['csr_no']) && !isset($obj['edit_csr_entry_id'])) {
         exit();
     }
 
+    if (empty($obj['error_details']) || !is_array($obj['error_details'])) {
+        $output["head"]["code"] = 400;
+        $output["head"]["msg"] = "Please provide valid error_details.";
+        echo json_encode($output, JSON_NUMERIC_CHECK);
+        exit();
+    }
+
     if (empty($obj['employee_sign']) || strpos($obj['employee_sign'], 'data:image') !== 0) {
         $output["head"]["code"] = 400;
         $output["head"]["msg"] = "Please provide a valid employee signature.";
@@ -377,6 +384,13 @@ elseif (isset($obj['edit_csr_entry_id'])) {
     if (empty($obj['parts_data']) || !is_array($obj['parts_data'])) {
         $output["head"]["code"] = 400;
         $output["head"]["msg"] = "Please provide parts_data.";
+        echo json_encode($output, JSON_NUMERIC_CHECK);
+        exit();
+    }
+
+    if (empty($obj['error_details']) || !is_array($obj['error_details'])) {
+        $output["head"]["code"] = 400;
+        $output["head"]["msg"] = "Please provide valid error_details.";
         echo json_encode($output, JSON_NUMERIC_CHECK);
         exit();
     }
