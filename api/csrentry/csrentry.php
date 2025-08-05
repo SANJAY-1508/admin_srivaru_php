@@ -103,7 +103,35 @@ elseif (isset($obj['action']) && $obj['action'] === 'list_error' && isset($obj['
     $search_text = $conn->real_escape_string($obj['search_text']);
     $output["body"]["errors"] = [];
 
-    $query = "SELECT * FROM `error` WHERE (`error_code` LIKE '%$search_text%' OR `error_describtion` LIKE '%$search_text%') AND `delete_at` = 0 ORDER BY id DESC";
+    $query = "
+        SELECT 
+            id, error_id, error_code, error_describtion AS error_description, 'error' AS source
+        FROM error
+        WHERE delete_at = 0 AND (error_code LIKE '%$search_text%' OR error_describtion LIKE '%$search_text%')
+
+        UNION ALL
+
+        SELECT 
+            id, grid_drop_id AS error_id, grid_drop_code AS error_code, grid_drop_describtion AS error_description, 'grid_drop' AS source
+        FROM grid_drop
+        WHERE delete_at = 0 AND (grid_drop_code LIKE '%$search_text%' OR grid_drop_describtion LIKE '%$search_text%')
+
+        UNION ALL
+
+        SELECT 
+            id, grid_fault_id AS error_id, grid_fault_code AS error_code, grid_fault_describtion AS error_description, 'grid_fault' AS source
+        FROM grid_fault
+        WHERE delete_at = 0 AND (grid_fault_code LIKE '%$search_text%' OR grid_fault_describtion LIKE '%$search_text%')
+
+        UNION ALL
+
+        SELECT 
+            id, maintenance_id AS error_id, maintenance_code AS error_code, maintenance_describtion AS error_description, 'maintenance' AS source
+        FROM maintenance
+        WHERE delete_at = 0 AND (maintenance_code LIKE '%$search_text%' OR maintenance_describtion LIKE '%$search_text%')
+
+        ORDER BY id DESC
+    ";
 
     error_log("SQL query: " . $query);
 
@@ -125,6 +153,7 @@ elseif (isset($obj['action']) && $obj['action'] === 'list_error' && isset($obj['
     echo json_encode($output, JSON_NUMERIC_CHECK);
     exit();
 }
+
 
 // Create CSR Entry
 elseif (isset($obj['csr_no']) && !isset($obj['edit_csr_entry_id'])) {
