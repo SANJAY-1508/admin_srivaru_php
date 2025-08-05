@@ -1,0 +1,333 @@
+<?php
+
+include("../../config/db_config.php");
+header('Access-Control-Allow-Origin: *');
+header("Access-Control-Allow-Methods: POST, GET, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type");
+header('Content-Type: application/json; charset=utf-8');
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+$output = array();
+date_default_timezone_set('Asia/Calcutta');
+$today_date = date('Y-m-d');
+$data = json_decode(file_get_contents("php://input"));
+
+$daily_data = [];  // Initialize array
+$all_wtg_data = []; // Initialize array
+
+
+if (isset($data->user_id)) {
+    $user_id = $data->user_id;
+    $filter_date_input = isset($data->filter_date) && !empty($data->filter_date) ? $data->filter_date : date('d-m-Y');
+
+    // Validate the filter_date format and ensure it's a real date
+    $date = DateTime::createFromFormat('d-m-Y', $filter_date_input);
+    $filter_date = ($date && $date->format('d-m-Y') === $filter_date_input) ? $date->format('Y-m-d') : null;
+
+
+
+    if (!$filter_date) {
+        $output["status"] = 400;
+        $output["msg"] = "Invalid filter date.";
+        echo json_encode($output, JSON_NUMERIC_CHECK);
+        exit;
+    }
+
+    // Check user in customer_group or customer table
+    $group_condition = null;
+    $sql_check_group = "SELECT * FROM customer_group WHERE BINARY customergroup_uniq_id = ? AND delete_at = '0'";
+    $stmt_check_group = $conn->prepare($sql_check_group);
+    $stmt_check_group->bind_param("s", $user_id);
+    $stmt_check_group->execute();
+    $result_check_group = $stmt_check_group->get_result();
+
+    if ($result_check_group->num_rows > 0) {
+        $group_condition = "BINARY cg.customergroup_uniq_id = ?";
+    } else {
+        $sql_check_customer = "SELECT * FROM customer WHERE BINARY customer_unique_id = ? AND delete_at = '0'";
+        $stmt_check_customer = $conn->prepare($sql_check_customer);
+        $stmt_check_customer->bind_param("s", $user_id);
+        $stmt_check_customer->execute();
+        $result_check_customer = $stmt_check_customer->get_result();
+
+        if ($result_check_customer->num_rows > 0) {
+            $group_condition = "BINARY c.customer_unique_id = ?";
+        } else {
+            $output["status"] = 400;
+            $output["msg"] = "No Data";
+            echo json_encode($output, JSON_NUMERIC_CHECK);
+            exit;
+        }
+    }
+
+    $sql_daily = "
+    SELECT c.*, cg.*, t.wtg_no, t.loc_no, dg.total_production, dg.dg_date,
+           dg.gridfault_overtotal, dg.griddrop_overtotal, dg.error_overtotal
+    FROM customer c
+    INNER JOIN customer_group cg ON c.customergroupname_id COLLATE utf8mb4_general_ci = cg.customergroup_uniq_id COLLATE utf8mb4_general_ci
+    LEFT JOIN turbine t ON t.customer_id COLLATE utf8mb4_general_ci = c.customer_unique_id COLLATE utf8mb4_general_ci
+    LEFT JOIN daily_generation dg ON t.turbine_id COLLATE utf8mb4_general_ci = dg.turbine_id COLLATE utf8mb4_general_ci
+    WHERE $group_condition 
+      AND c.delete_at = '0' 
+      AND t.delete_at = '0'
+      AND dg.dg_date = (
+          SELECT MAX(dg2.dg_date)
+          FROM daily_generation dg2
+          WHERE dg2.turbine_id COLLATE utf8mb4_general_ci = t.turbine_id COLLATE utf8mb4_general_ci
+            AND dg2.dg_date <= ?
+      )
+    ORDER BY t.wtg_no, dg.dg_date DESC;
+";
+
+
+    $stmt_daily = $conn->prepare($sql_daily);
+    $stmt_daily->bind_param("ss", $user_id, $filter_date);
+    $stmt_daily->execute();
+    $result_daily = $stmt_daily->get_result();
+
+    $most_recent_date = null;
+    $total_hours_decimal = 24.00;
+
+    if ($result_daily->num_rows > 0) {
+        while ($row = $result_daily->fetch_assoc()) {
+            $dg_date = isset($row['dg_date']) ? date('Y-m-d', strtotime($row['dg_date'])) : null;
+            $total_production = ($dg_date === $filter_date) ? floatval($row['total_production']) : 0;
+
+            if ($most_recent_date === null || $dg_date > $most_recent_date) {
+                $most_recent_date = $dg_date;
+            }
+
+            if ($dg_date === $most_recent_date) {
+                $gridfault_overtotal_decimal = floatval($row['gridfault_overtotal'] ?? 0);
+                $griddrop_overtotal_decimal = floatval($row['griddrop_overtotal'] ?? 0);
+                $error_overtotal_decimal = floatval($row['error_overtotal'] ?? 0);
+
+                $machine_availability = ($total_hours_decimal != 0)
+                    ? number_format((($total_hours_decimal - ($gridfault_overtotal_decimal + $griddrop_overtotal_decimal + $error_overtotal_decimal)) / $total_hours_decimal) * 100, 2)
+                    : '0.00';
+
+                $grid_availability = ($total_hours_decimal != 0)
+                    ? number_format((($total_hours_decimal - ($gridfault_overtotal_decimal + $griddrop_overtotal_decimal)) / $total_hours_decimal) * 100, 2)
+                    : '0.00';
+            } else {
+                $machine_availability = '0.00';
+                $grid_availability = '0.00';
+            }
+
+            $row['total_production'] = $total_production;
+            $row['machine_availability'] = $machine_availability;
+            $row['grid_availability'] = $grid_availability;
+
+            $daily_data[] = $row;
+        }
+    }
+
+    // Convert filter_date to 'Y-m' format for SQL query
+    $month_year = date('Y-m', strtotime($filter_date));
+
+
+    $sql_min_date = "
+SELECT MIN(DATE_FORMAT(dg.dg_date, '%Y-%m')) AS min_month
+FROM daily_generation dg
+LEFT JOIN turbine t ON dg.turbine_id = t.turbine_id
+LEFT JOIN customer c ON t.customer_id = c.customer_unique_id COLLATE utf8mb4_general_ci
+WHERE c.customer_unique_id COLLATE utf8mb4_general_ci = ?
+  AND c.delete_at = '0'
+  AND t.delete_at = '0'
+";
+    $stmt_min_date = $conn->prepare($sql_min_date);
+    $stmt_min_date->bind_param("s", $user_id);
+    $stmt_min_date->execute();
+    $result_min_date = $stmt_min_date->get_result();
+    $row_min_date = $result_min_date->fetch_assoc();
+    $stmt_min_date->close();
+
+    // Check if we have a minimum date
+    $min_month = $row_min_date['min_month'] ?? $month_year;
+
+    // Step 2: Generate a list of months from min_month to filter_date month
+    $date_period = new DatePeriod(
+        new DateTime($min_month . '-01'),
+        new DateInterval('P1M'),
+        new DateTime($month_year . '-01')
+    );
+    $months = array_map(
+        fn($date) => $date->format('Y-m'),
+        iterator_to_array($date_period)
+    );
+    $months[] = $month_year; // Include the filter_date month itself
+
+    // Step 3: Modify SQL to dynamically check all months in the range
+    $placeholders = implode(',', array_fill(0, count($months), '?'));
+// Set charset to utf8mb4 (no collation here)
+$conn->set_charset("utf8mb4");
+
+// Your SQL query, with collation specified where necessary
+$sql_all_wtg_no = "
+SELECT c.*, cg.*, t.wtg_no, t.loc_no,
+    COALESCE(SUM(CASE WHEN DATE_FORMAT(dg.dg_date, '%Y-%m') = ? THEN dg.total_production ELSE 0 END), 0) AS total_production,
+    DATE_FORMAT(dg.dg_date, '%Y-%m') AS month,
+    COALESCE(SUM(dg.gridfault_overtotal), 0) AS gridfault_overtotal,
+    COALESCE(SUM(dg.griddrop_overtotal), 0) AS griddrop_overtotal,
+    COALESCE(SUM(dg.error_overtotal), 0) AS error_overtotal
+FROM customer c 
+INNER JOIN customer_group cg 
+    ON c.customergroupname_id COLLATE utf8mb4_general_ci = cg.customergroup_uniq_id COLLATE utf8mb4_general_ci
+LEFT JOIN turbine t 
+    ON t.customer_id COLLATE utf8mb4_general_ci = c.customer_unique_id COLLATE utf8mb4_general_ci
+LEFT JOIN daily_generation dg 
+    ON t.turbine_id = dg.turbine_id
+    AND DATE_FORMAT(dg.dg_date, '%Y-%m') IN ($placeholders)
+WHERE c.customer_unique_id COLLATE utf8mb4_general_ci = ? 
+  AND c.delete_at = '0' 
+  AND t.delete_at = '0'
+  AND dg.dg_date = (
+      SELECT MAX(dg2.dg_date)
+      FROM daily_generation dg2
+      WHERE dg2.turbine_id = t.turbine_id
+      AND dg2.dg_date <= ? COLLATE utf8mb4_general_ci
+  )
+GROUP BY t.wtg_no
+ORDER BY month DESC
+";
+
+
+
+    
+    // Prepare and execute the query
+    $stmt_all_wtg_no = $conn->prepare($sql_all_wtg_no);
+    // Prepare parameters for binding
+    $params = array_merge([$month_year], $months, [$user_id, $filter_date]);
+    $stmt_all_wtg_no->bind_param(str_repeat('s', count($params)), ...$params);
+    $stmt_all_wtg_no->execute();
+    $result_all_wtg_no = $stmt_all_wtg_no->get_result();
+
+    $all_wtg_data = []; // Initialize the array to hold the turbine data
+
+    if ($result_all_wtg_no->num_rows > 0) {
+        // Process results
+        while ($row = $result_all_wtg_no->fetch_assoc()) {
+            // Set total_production to 0 if data is from previous months
+            if ($row['month'] != $month_year) {
+                $row['total_production'] = 0;
+            }
+            $all_wtg_data[] = $row;
+        }
+    } else {
+        // Log if no data found for the user in any month
+        error_log("No data found for user_id: $user_id, filter_date: $filter_date.");
+    }
+    $stmt_all_wtg_no->close();
+
+    $current_year = date('Y');
+    if (!empty($data->filter_date)) {
+        $filter_date = DateTime::createFromFormat('d-m-Y', $data->filter_date);
+        if ($filter_date) {
+            $current_year = $filter_date->format('Y');
+        } else {
+            $output["status"] = 400;
+            $output["msg"] = "Invalid date format. Use dd-mm-yyyy.";
+            echo json_encode($output);
+            exit;
+        }
+    }
+
+    $next_year = $current_year + 1;
+
+    if ($result_check_group->num_rows > 0) {
+        $sql = "SELECT c.*, cg.*, t.wtg_no, t.loc_no, SUM(dg.total_production) AS total_production
+                FROM customer c 
+                INNER JOIN customer_group cg ON BINARY c.customergroupname_id = BINARY cg.customergroup_uniq_id 
+                LEFT JOIN turbine t ON t.customer_id = c.customer_unique_id
+                LEFT JOIN daily_generation dg ON dg.turbine_id = t.turbine_id AND YEAR(dg.dg_date) = ?
+                WHERE BINARY cg.customergroup_uniq_id = ? AND c.delete_at = '0'
+                GROUP BY t.wtg_no";
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("is", $current_year, $user_id);
+    } else {
+        // Check if the user_id exists in the customer table
+        $sql_check_customer = "SELECT * FROM customer WHERE BINARY customer_unique_id = ? AND delete_at = '0'";
+        $stmt_check_customer = $conn->prepare($sql_check_customer);
+        $stmt_check_customer->bind_param("s", $user_id);
+        $stmt_check_customer->execute();
+        $result_check_customer = $stmt_check_customer->get_result();
+
+        if ($result_check_customer->num_rows > 0) {
+            // Fetch customer data directly if user_id is in the customer table
+            $sql = "SELECT c.customer_name, t.wtg_no, t.loc_no, SUM(dg.total_production) AS total_production
+                    FROM customer c
+                    LEFT JOIN turbine t ON t.customer_id = c.customer_unique_id
+                    LEFT JOIN daily_generation dg ON dg.turbine_id = t.turbine_id AND YEAR(dg.dg_date) = ?
+                    WHERE BINARY c.customer_unique_id = ? AND c.delete_at = '0'
+                    GROUP BY t.wtg_no";
+            $stmt = $conn->prepare($sql);
+            $stmt->bind_param("is", $current_year, $user_id);
+        } else {
+            $output["status"] = 400;
+            $output["msg"] = "No Data";
+            $output["data"] = [];
+            echo json_encode($output, JSON_NUMERIC_CHECK);
+            exit;
+        }
+    }
+
+    $stmt->execute();
+    $sqlresult = $stmt->get_result();
+
+    // Main processing of results
+    $customer_data = array();
+    $total_production_sum = 0; // Initialize the total production sum
+
+    while ($row = $sqlresult->fetch_assoc()) {
+        $customer_name = $row['customer_name'];
+
+        // Accumulate the total production sum
+        if (isset($row['total_production'])) {
+            $total_production_sum += $row['total_production'];
+        }
+
+        // Group by customer
+        if (isset($data->group_by_customer) && $data->group_by_customer) {
+            if (!isset($customer_data[$customer_name])) {
+                $customer_data[$customer_name] = $row;
+                $customer_data[$customer_name]['wtg_no'] = array();
+            }
+            if (isset($row['wtg_no'])) {
+                $customer_data[$customer_name]['wtg_no'][] = $row['wtg_no'];
+            }
+        } else {
+            $output["data"][] = $row;
+        }
+    }
+
+    if (isset($data->group_by_customer) && $data->group_by_customer) {
+        $output["data"] = array_values($customer_data);
+    }
+
+    // Add the total production sum to the output
+    // Ensure $daily_data is defined if used
+    if (isset($daily_data)) {
+        $output["daily_data"] = $daily_data;
+    } else {
+        $output["daily_data"] = []; // Default value if daily_data is not defined
+    }
+
+
+    // Prepare output data
+    $output = [
+        "total_production" => $total_production_sum,
+        "current_year" => $current_year . '-' . $next_year,
+        "status" => 200,
+        "msg" => "success",
+        "today_date" => date('Y-m-d'), // Define today_date
+        "filter_date" => $filter_date,
+        "daily_data" => $daily_data,
+        "monthly" => $all_wtg_data, // Result data
+    ];
+} else {
+    $output["status"] = 400;
+    $output["msg"] = "User ID is required.";
+}
+echo json_encode($output, JSON_NUMERIC_CHECK);
